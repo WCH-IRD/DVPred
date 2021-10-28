@@ -1,0 +1,5 @@
+The training dataset included 1118 out of 1318 curated P/LP nsSNVs and 2236 randomly selected B/LB nsSNVs 
+
+The testing dataset included 200 P/LP nsSNVs and 200 randomly selected B/LB nsSNVs.
+
+After the construction of DVPred, newly reported P/LP variants were collected from CDGC and ClinVar for further assessment. P/LP variants reported by ClinVar between 2018 and 2021 were defined as the subtraction of ClinVar released data version v20171206 from the v20210404. Novel P/LP variants identified in the CDGC cohort were defined as absent in DVD (v9.0), ClinVar (v20210404), and HGMD (2020q4). The assessment set included 590 P/LP nsSNVs and 590 randomly selected B/LB nsSNVs.
