@@ -1,0 +1,487 @@
+#!/usr/bin/env python
+#-*- coding: utf-8 -*-
+# 写死了其中几个内嵌文件的路径
+import sys
+import os
+import csv
+import getopt
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+def prefix_path():
+	for i in sys.argv:
+		if i== '-P':
+			ind = sys.argv.index(i)
+			break
+	return sys.argv[ind+1]
+
+sys.path.append(prefix_path()+'ML_pred/scripts')
+from f2_no_head_vcf import *
+from f3_single_transcript_vcf import *
+from f4_initial_feature_data import *
+from f5_expand_feature_data import *
+from f6_filled_data import *
+from f7_predicted_vcf import *
+from f8_final_excel import *
+from f9_normalization import *
+def usage():
+	if len(sys.argv) <= 4:
+		print('ML_pred version 1.0')
+		print('Usage: python ML_pred.py [options] -i input.vcf -n non_repeat_region.vcf -o output.csv ')
+		print('Example: python ML_pred.py -S SYMBOL.list -C Consequence.list -I Inheritance.list -f initial_features.list -m SVM/LR/RandomForest/GBDT -r -p -d -i input.vcf -o output.csv ')
+		print('Example: python ML_pred.py  -P /bioapp/ -i ../HGMD/wym-all_refseq_0828.vcf -o 0908.csv')
+		print('    options:')
+		print('    -S FILE    --SYMBOL list                A list for Gene Symbol, which has the')
+		print('                                            highest priority in transcript selection.')
+		print('                                            Default ~/ML_pred/lists/SYMBOL.list.')
+		print('    -C FILE    --Consequence list           A List for ordered Consequence items. ')
+		print('                                            Fixed and default ~/ML_pred/lists/Consequence.list.')
+		print('    -I FILE    --Inheritance pattern list   A list for SYMBOL and their corresponding Inheritance pattern.')
+		print('                                            Fixed and default ~/ML_pred/lists/Inheritance.list.')
+		print('    -f FILE    --initial feature list       A list for initial features.')
+		print('                                            Fixed and default ~/ML_pred/lists/initial_features.list.')
+		print('    -m STRING  --model name                 4 models are afforded: LR, SVM,RandomForest and GBDT. ')
+		print('                                            Add "/" among the models if more than one models are required. ')
+		print('                                            Default LR.')
+		print('    -l FILE    --label column list.         If input has label, we verify their labels. Otherwise, we predict their labels.')
+		print('    -F         --record FP and FN.')
+		print('    -p         --print feature scores.')
+		print('    -d         --draw ROC.')
+		print('    -k STRING  --imputation.                hot_deck/average.')
+		print('    -t list  --param.                [para1,para2].')
+		print('    -h         --print usage.')
+		raise SystemExit
+
+# 抓取vcf文件header的CSQ字段，是以|分割的字符串
+def csq(vcffile):
+	# t = os.popen("grep '#' "+vcffile+ " |grep 'ID=CSQ'| awk -F ' ' '{print $NF}'|awk -F '\"' '{print $1}' | tail -n 1").readlines()
+	t = os.popen(" head -n 500 "+vcffile+" | grep '#' |grep 'ID=CSQ'| awk -F ' ' '{print $NF}'|cut -d \\\" -f 1 | tail -n 1  ").readlines()
+	return t[0].strip('\n')
+
+# 根据文件名称寻找它的绝对路径，这些都是ML_pred中的固定文件
+def find_default_file(file_name,file_type):
+	res = ML_pred_pre_path+'ML_pred/'+file_type+'/'+file_name
+	return res
+
+# 得到倒数第二列作为label
+def get_label(input_vcf):
+	p=os.popen("awk -F '\t' 'END{ print NF}' " + input_vcf).readlines()
+	NF = int(p[0].strip('\n'))
+	label_file = './ML/tmp/label0_test'
+	os.system('cut -f ' + str(NF-1) + ' ' + input_vcf + ' > ./ML/tmp/label0_test '  ) 
+	return label_file
+
+def get_row(input_file,out_file):
+	p=os.popen("awk -F '\t' 'END{ print NF}' " + input_file).readlines()
+	NF = int(p[0].strip('\n'))
+	os.system('cut -f 1-' + str(NF-1) + ' ' + input_file + '>' + out_file )
+	return out_file
+	
+#　输出的格式为，致病性概率，+ out_body，这里的out_body，包括了单转录本(很多列，分割了｜)，和多转录本的一列（没有分割）
+def out_body(count_fea,single_transcript_vcf,no_head_path,out_path):
+#	s1 = os.system('cut -f 1-7 ' + single_transcript_vcf + ' > ' + out_path + 'tmp1_0.txt')# 固定的前７列
+
+	s1 = os.system('cut -f 1-7 ./ML/tmp/single_transcript.vcf.0 > ' + out_path + 'tmp1_0.txt')
+	s2 = os.system('cut -f 8 ./ML/tmp/single_transcript.vcf.0 > ' + out_path + 'tmp2_0.txt')
+
+#	s2 = os.system('cut -f 8 ' + single_transcript_vcf + ' > ' + out_path + 'tmp2_0.txt')# 单转录本的CSQ列
+	p=os.popen("awk -F '\t' 'END{ print NF}' " + no_head_path).readlines()#　初始文件的列数NF
+	NF = p[0].strip('\n')
+	s3 = os.system('cut -f 8-'+NF +' '+no_head_path+ ' > ' + out_path + 'tmp3_0.txt')  #初始文件从CSQ到最后一列
+	f = open(out_path+'tmp1.txt','w')
+	for line in open(out_path+'tmp1_0.txt'):   # 前七列，写成chr:pos的形式
+		line = line.strip('\n').split('\t')
+		rank7 =  line[0]+":" +line[1]+ '\t' + '\t'.join(line[2:len(line)])
+		f.write(rank7+'\n')
+	f.close()
+	f = open(out_path+'tmp3.txt','w')
+	for line in open(out_path+'tmp3_0.txt'):   # 多转录本
+		line = line.strip('\n')
+		csq =  line.split('CSQ=')
+		for i in range(len(csq)):
+			if '|' in csq[i]:
+				csq[i] = 'CSQ='+csq[i]
+				break
+
+		f.write('\t'.join(csq)+'\n')
+	f.close()
+	f = open(out_path+'tmp2.txt','w')
+	for line in open(out_path+'tmp2_0.txt'):   # 单转录本用｜分割成很多列
+		line = line.strip('\n')
+		csq =  line[4:len(line)].split('|')
+		f.write('\t'.join(csq)+'\n')
+	f.close()
+	return s1+s2+s3
+
+def main():
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], "S:C:I:f:m:i:P:n:o:Fpdl:k:t:h")
+		if len(opts) == 0:
+			usage()
+			sys.exit()
+		else:
+			for opt, arg in opts:
+				print opt, arg
+			ML_pred_pre_path = prefix_path()
+			input_vcf=''
+			output_vcf=''
+			input_label=''
+			CSQ=''
+			ML_model=['LR']
+			model_path = [ML_pred_pre_path+'ML_pred/models/LR.m']
+			flag_FN_FP = 0
+			flag_fea_score = 0
+			flag_roc = 0
+			flag_label = 0
+			imputation = "hot_deck"
+
+
+			for opt, arg in opts:
+				if opt == '-P':
+					ML_pred_pre_path = arg
+				if opt == '-i':
+					try:
+						input_vcf = arg
+						CSQ = csq(arg)
+						# print CSQ
+					except IOError:
+						print ('ERROR: Input VCF has no CSQ in its header!')
+						sys.exit()
+				if opt == '-n':
+					try:
+						non_repeat_region_vcf = arg
+					except IOError:
+						print ('ERROR: Input non_repeat_region VCF "'+arg + '" you afforded got something wrong!')
+						sys.exit()
+				if opt == '-S':
+					try:
+						list_symbol = [ line.strip('\n') for line in open(arg)]
+						# print list_symbol
+					except IOError:
+						print ('ERROR: The SYMBOL list file "'+arg+'" you afforded got something wrong!')
+						sys.exit()
+				elif opt == '-C':
+					try:
+						list_consequence = [ line.strip('\n') for line in open(arg)]
+						# print list_consequence
+						if list_consequence == []:
+							print ('ERROR: The consequence list file "'+arg+'" you afforded is empty!')
+							sys.exit()
+					except IOError:
+						print ('ERROR: The consequence list file "'+arg+'" you afforded got something wrong!')
+						sys.exit()
+				elif opt == '-f':
+					try:
+						list_feature = [ line.strip('\n') for line in open(arg)]
+						# print list_feature
+						if list_feature == []:
+							print ('ERROR: The consequence list file "'+arg+'" you afforded is empty!')
+							sys.exit()
+					except IOError:
+						print ('ERROR: The consequence list file "'+arg+'" you afforded got something wrong!')
+						sys.exit()
+
+				elif opt == '-I':
+					try:
+						list_inheritance = [line.strip('\n') for line in open(arg)]
+						# print list_inheritance
+					except IOError:
+						print ('ERROR: The inheritance list file "'+arg+'" you afforded got something wrong!')
+						sys.exit()
+				elif opt == '-m':
+					model_path=[]
+					if ML_model=='':
+						model_path.append(ML_pred_pre_path+'ML_pred/models/LR.m')
+					else:
+						ML_model = arg.split('/')
+						for model in ML_model:
+							if not model in ['LR', 'SVM', 'RandomForest', 'GBDT', 'NN', 'KNN', 'NB', 'Stacking']:
+								print ('ERROR: Please input correct ML model. You can choose one from LR, SVM, RandomForest and GBDT.')
+								sys.exit()
+							else:
+								model_path.append(ML_pred_pre_path+'ML_pred/models/'+model+'.m')
+
+				elif opt == '-F':
+					flag_FN_FP = 1
+				elif opt == '-p':
+					flag_fea_score = 1
+				elif opt == '-d':
+					flag_roc = 1
+				elif opt == '-l':
+					if os.path.exists(arg):
+						flag_label = 1
+						input_label = arg
+					else:
+						print ('ERROR: Please input correct one-column label file.')
+						sys.exit()
+				elif opt == '-h':
+					usage()
+					sys.exit()
+				elif opt == '-t':
+					param_list = arg
+					print  "\n\n"+ param_list+ "\n\n"
+				elif opt == '-o':
+					output_vcf = arg.replace('csv','vcf')
+				elif opt == '-k':
+					try:
+						imputation = arg
+					except IOError:
+						print ('ERROR: Input imputation "'+arg + '" you afforded got something wrong!')
+						sys.exit()
+			try:
+				print ML_pred_pre_path+'ML_pred/lists/SYMBOL.list'
+
+				list_symbol = [line.strip('\n') for line in open(ML_pred_pre_path+'ML_pred/lists/SYMBOL.list')]
+				list_consequence = [line.strip('\n') for line in open(ML_pred_pre_path+'ML_pred/lists/Consequence.list')]
+				list_inheritance = [line.strip('\n') for line in open(ML_pred_pre_path+'ML_pred/lists/Inheritance.list') ]
+				list_feature = [line.strip('\n') for line in  open(ML_pred_pre_path+'ML_pred/lists/initial_features.list') ]
+				os.system('sed \'$a\Feature\' lists/initial_features.list > lists/initial_features_enst.list')
+				list_feature_enst = [line.strip('\n') for line in  open(ML_pred_pre_path+'ML_pred/lists/initial_features_enst.list') ]
+				list_feature_all = [line.strip('\n') for line in  open(ML_pred_pre_path+'ML_pred/lists/initial_features_all.list') ]
+				list_domain = [line.strip('\n') for line in  open(ML_pred_pre_path+'ML_pred/lists/pfam.list') ]
+
+			except Exception, e:
+				logger.error('Failed to open default file', exc_info=True)
+
+			step1 = -1
+			step2 = -1
+			step3 = -1
+			step4 = -1
+			if not os.path.exists('./ML'):
+				step1 = os.system("mkdir ML")
+			else:
+				step1 = 0
+			if not os.path.exists('./ML/tmp'):
+				step2 = os.system("mkdir ML/tmp")
+			else:
+				step2 = 0
+			if not os.path.exists('./ML/res'):
+				step3 = os.system("mkdir ML/res")
+			else:
+				step3 = 0
+			if not os.path.exists('./ML/list/'):
+				step4 = os.system("mkdir ML/list")
+			else:
+				step4 = 0
+
+			out_path = './ML/res/'
+
+			if step1==0 and step2==0 and step3==0 and step4==0:
+
+				print ('1.Grab the CSQ field------------------------')
+				csq_field = csq(input_vcf)
+				input_raw_vcf = input_vcf
+				os.system('grep \'#\' ' + input_vcf + '>head')
+				print csq_field
+				print ('2.Generate no-head VCF----------------------')
+				no_head_path = no_head(input_vcf)
+				print no_head_path
+				print ('3.Generate single-transcript VCF------------')
+				single_transcript_vcf = select_transcript(no_head_path,csq_field,list_symbol,list_consequence,'single_transcript.vcf')
+#				os.system('mv ./ML/tmp/single_transcript.vcf ./ML/tmp/single_transcript.vcf.0')
+#				os.system('grep -v -E \'intron|synonymous_variant|5_prime_UTR_variant|3_prime_UTR_variant|upstream_gene_variant|downstream_gene_variant|intergenic_variant|LOW|MODIFIER\' ./ML/tmp/single_transcript.vcf.0 > ./ML/tmp/single_transcript.vcf.1')
+#				os.system('awk -F \'\t\' \'{if((length($4) ==1) && (length($5) ==1)){print $0}}\' ./ML/tmp/single_transcript.vcf.1 > ./ML/tmp/single_transcript.vcf ')
+				os.system('cut -f 10 ./ML/tmp/single_transcript.vcf > ./ML/tmp/label0')
+				os.system('cut -f 11 ./ML/tmp/single_transcript.vcf > ./ML/tmp/name0')
+				print single_transcript_vcf
+				print ('4.Generate initial-feature text file--------')
+				#roc_files = ["REVEL_rankscore", "CADD_RAW", "MCAP_RAW", "rf_score", "MetaLR_score", "SIFT_RAW"] #, "PolyPhen"
+				roc_files = ["ClinPred_ClinPred", "CADD_RAW", "M-CAP_score", "Polyphen2_HDIV_score", "MetaLR_score", "SIFT_score","primateDL_score_primateDL_score","REVEL_RAW"] #, "PolyPhen"
+				initial_feature_data = initial_feature(single_transcript_vcf,csq_field,list_feature_all,list_inheritance,'initial_feature_all.data', roc_files)
+				initial_feature_data = initial_feature(single_transcript_vcf,csq_field,list_feature_enst,list_inheritance,'initial_feature.data', ["M-CAP_score"])
+				os.system('mv ./ML/tmp/initial_feature.data ./ML/tmp/initial_feature.data.0')
+				initial_new = get_row('./ML/tmp/initial_feature.data.0','./ML/tmp/initial_feature.data')
+				#os.system('perl ./scripts/add_VEST.20180809.pl /public/home/swgenetics_5/GeneDock/database/Variant_Additional_Details.Result.tsv ./ML/tmp/initial_feature.data.0 ./ML/tmp/initial_feature.data')
+				print initial_feature_data
+				os.system('head -n 1 '+initial_feature_data)
+				initail_file_name = str((os.path.basename(input_vcf)).split('_')[0]) + '_initail_feature.data'
+				os.system('cp ' + initial_feature_data + ' ' + initail_file_name)
+				print ('5.Generate expand-feature text file---------')
+				expand_feature_name, expand_feature_data = expand_feature(initial_feature_data,list_feature,list_symbol,list_consequence,list_domain,'expand_feature.data','expand_feature.name')
+				print expand_feature_name
+#				expand_feature_name ="./ML/list/expand_feature.name"
+				print expand_feature_data
+				print ('6.Fill the missing values and normalization--')
+				filled_data = fill_data(expand_feature_data,'filled.data', imputation)
+				print filled_data
+				#print ('7.training----------------------------------')
+				all_data = './ML/tmp/all00.data'
+				os.system('paste ./ML/tmp/filled.data ./ML/tmp/label0 ./ML/tmp/name0  > ' + all_data)
+				#os.system('paste ./ML/tmp/filled.data ' + input_label + ' > ' + all_data)
+				#mcap_data = './ML/tmp/mcap.data'
+				#os.system('paste ./ML/tmp/mcap.txt ./ML/tmp/label0 > ' + mcap_data)
+				n_str = ''
+				for n in roc_files:
+					n_data = './ML/tmp/' + n + '.data'
+					os.system('paste ./ML/tmp/' + n + '.txt ./ML/tmp/label0 > ' + n_data)
+					if n_str:
+						n_str = n_str + '/' + n
+					else:
+						n_str = n
+				print ('7.1.normalization---------------------------')
+				input_base = str((os.path.basename(input_vcf)).split('_')[0])
+				#normal_all_data, normal_training_data, normal_10k_data, normal_morl_data = norm_data(all_data,input_base,'10k','morl')
+				input_base = 'training'
+				normal_all_data, normal_training_data, normal_10k_data, normal_morl_data = norm_data(all_data,input_base,'testing','morl')
+				#normal_all_data, normal_training_data, normal_10k_data, normal_morl_data = norm_data(all_data,input_base,'training','morl')
+				os.system('echo \"ML\tbinary-class\tprecision\trecall\tf1\tAUC\tPR_AUC\taccuracy\" > result.txt')
+				#ML_model = ['LR', 'SVM', 'RandomForest', 'GBDT', 'NN', 'KNN', 'NB', 'Stacking']
+
+
+				n_str = "CADD_RAW"
+#				normal_training_data = "./ML/tmp/CDGC_scaled.data"
+#				os.system('mv ./ML/tmp/expand_feature.data.training ./ML/tmp/expand_feature.data')
+				print ('7.training----------------------------------')
+				for m in ML_model:
+					os.system('cp ./ML/list/expand_feature.name ./ML/list/expand_feature.name.tt')
+					print("python scripts/train_ml.py %s GBDT ./ML/list/expand_feature.name.tt 1 REVEL_RAW \"%s\"" %(normal_training_data,param_list))
+					os.system('python scripts/train_ml.py '+ normal_training_data + ' ' + m + ' ./ML/list/expand_feature.name 2 ' + n_str +  ' "' + param_list +'" | tail -2 >> result.txt')
+				os.system('cat result.txt')
+				out_all_csv_name = str((os.path.basename(input_vcf)).split('_')[0]) + '_all_training.csv'
+				out_all_csv_name_all = str((os.path.basename(input_vcf)).split('_')[0]) + '_all_training_all.csv'
+				#os.system('python scripts/merge_result.py all.txt.training.merge ' + out_all_csv_name + ' ./ML/list/expand_feature.name ./ML/list/expand_feature.name.0 ./ML/tmp/initial_feature.data lists/initial_features.list ' + param_list )
+				#os.system('python scripts/merge_result.py all.txt.training.merge ' + out_all_csv_name_all + ' ./ML/list/expand_feature.name ./ML/list/expand_feature.name.0 ./ML/tmp/initial_feature_all.data lists/initial_features_all.list ' + param_list )
+				#exit()				
+
+
+
+				########################################## 10k
+				print ('8.10k-Predict - 1 Generate single-transcript VCF ---------')
+				os.system('mv ./ML/tmp/initial_feature.data ./ML/tmp/initial_feature.data.training')
+				os.system('mv ./ML/tmp/expand_feature.data ./ML/tmp/expand_feature.data.training')
+				os.system('mv ./ML/tmp/filled.data ./ML/tmp/filled.data.training')
+				os.system('mv ./ML/list/expand_feature.name ./ML/list/expand_feature.name.training')
+				os.system('mv ./ML/tmp/single_transcript.vcf ./ML/tmp/single_transcript.vcf.training')
+				training_vcf = input_vcf
+				#test_vcf = "/public/home/swgenetics_5/GeneDock/annotation/10k/10000.test.anno_HL.vcf"
+				#test_vcf = "~/GeneDock/annotation/benign_1/10k_B_LB.txt"
+				#test_vcf = "~/GeneDock/annotation/all_PB/all_PB.test.anno.vcf"
+				#os.system('python scripts/filter.py ' + training_vcf + ' ' + test_vcf + ' ./ML/tmp/10000.filter.anno.vcf' )
+				#input_vcf = "~/GeneDock/annotation/benign_1/CDGC_B_LB.vcf"
+				#input_vcf = "/public/home/swgenetics_5/GeneDock/annotation/benign_1/DVD_B_LB.vcf"
+				#input_vcf = "~/GeneDock/annotation/benign_1/10k_B_LB.txt"
+				#input_vcf = '10k_B_test_merge.vcf'
+				#input_vcf = '~/GeneDock/annotation/var_180425/var.test.anno_ALL.vcf'
+				#normal_10k_data = "./ML/tmp/10k_scaled.data"
+				#normal_10k_data = normal_training_data
+				input_scaled_data = normal_10k_data
+				print normal_10k_data
+				#os.system('grep -v \'#\' ' + input_raw_vcf + '|awk -F \'\t\' \'{if($11==\"10k\"){print $0}}\' > 10k.vcf ')
+				print ('grep -v \'#\' ' + input_raw_vcf + '|awk -F \'\t\' \'{if($11 ~ \"testing\"){print $0}}\' > 10k.vcf ')
+				os.system('grep -v \'#\' ' + input_raw_vcf + '|awk -F \'\t\' \'{if($11 ~ \"testing\"){print $0}}\' > 10k.vcf ')
+				os.system('cat head 10k.vcf > 10k_B_test_merge.vcf')
+				input_vcf = "10k_B_test_merge.vcf"
+                                no_head_path = no_head(input_vcf)
+                                single_transcript_vcf = select_transcript(no_head_path,csq_field,list_symbol,list_consequence,'single_transcript.vcf')
+				os.system('mv ./ML/tmp/single_transcript.vcf ./ML/tmp/single_transcript.vcf.0')
+                                os.system('grep -v -E \'intron|synonymous_variant|5_prime_UTR_variant|3_prime_UTR_variant|upstream_gene_variant|downstream_gene_variant|intergenic_variant|LOW|MODIFIER\' ./ML/tmp/single_transcript.vcf.0 > ./ML/tmp/single_transcript.vcf.1')
+#                               os.system('grep missense_variant ./ML/tmp/single_transcript.vcf.0 > ./ML/tmp/single_transcript.vcf.1')
+                                os.system('awk -F \'\t\' \'{if((length($4) ==1) && (length($5) ==1)){print $0}}\' ./ML/tmp/single_transcript.vcf.1 > ./ML/tmp/single_transcript.vcf ')	
+				##### balance P and B number
+				#os.system('python scripts/filter.py ' + training_vcf + ' ./ML/tmp/single_transcript.vcf.2 ./ML/tmp/single_transcript.vcf' ) 
+				initial_feature_data = initial_feature(single_transcript_vcf,csq_field,list_feature,list_inheritance,'initial_feature.data', "M-CAP_score")
+                                print initial_feature_data
+				print ('8.10k-Predict - 5 Predict the pathogenetic probability ---')
+#				os.system('mkdir ./models')
+				#os.system('mv ./lr.m ./models/LR.m')
+#				os.system('mv ./gbdt.m ./models/GBDT.m')
+				#os.system('mv ./rf.m ./models/RandomForest.m')
+				#os.system('mv ./svm.m ./models/SVM.m')
+				#os.system('mv ./nn.m ./models/NN.m')
+				#os.system('mv ./knn.m ./models/KNN.m')
+				#os.system('mv ./mnb.m ./models/NB.m')
+				#os.system('mv ./stacking.m ./models/Stacking.m')
+				#os.system('mv ./pca.m ./models/PCA.m')
+				model_dir_name = str((os.path.basename(training_vcf)).split('_')[0]) + '_models'
+				os.system('cp -rf ./models ' +  model_dir_name)
+				flag_label = 1
+				input_label = get_label(input_scaled_data)
+				#input_label = './ML/tmp/label0_test'
+				flag_FN_FP = 1
+				output_files = predict_pathogenicity(input_scaled_data,input_label,ML_model,model_path,flag_label,flag_FN_FP,flag_fea_score,flag_roc,expand_feature_name,out_path)
+				if out_body(len(list_feature),single_transcript_vcf,no_head_path,out_path) == 0:
+					print "8.10k-output------------------------------------"
+#					os.system('paste ' + ' '.join(output_files) + ' ./ML/res/tmp1.txt  ./ML/res/tmp2.txt  ./ML/res/tmp3.txt all.txt.test > '+ output_vcf)
+
+					os.system('paste ' + ' '.join(output_files) + ' ./ML/res/tmp1.txt  ./ML/res/tmp2.txt > '+ output_vcf)
+					#os.system('rm ./ML/res/tmp1.txt  ./ML/res/tmp2.txt  ./ML/res/tmp3.txt  ')
+#				out_csv = to_csv(output_vcf,csq_field,ML_model)
+				print output_vcf
+				os.system('grep -v \'#\' ' + input_vcf + '|awk -F \'\t\' \'{print $12}\' > 10k_label_old.vcf ')
+				name_1_test = str((os.path.basename(training_vcf)).split('_')[0]) + '_all_testing_' + str((os.path.basename(input_vcf)).split('.')[0]) + '.csv'
+				out_csv = to_csv(input_vcf,output_vcf,csq_field,ML_model,name_1_test,"10k_label_old.vcf")
+				os.system('cat result.txt')
+                		out_stat_10k =  str((os.path.basename(out_csv)).split('_')[0]) + '_' + imputation + "_result_" + str((os.path.basename(input_vcf)).split('.')[0]) + ".txt"
+                		
+				os.system('mv result.txt ' +  out_stat_10k)
+				out_csv_10k = str((os.path.basename(out_csv)).split('_')[0]) + "_training_" + str((os.path.basename(input_vcf)).split('.')[0]) + '.csv'
+				os.system('mv ' + out_csv + ' ' + out_csv_10k )
+				print out_csv_10k
+				os.system('cat ' + out_stat_10k )
+                                os.system('cat ' + out_stat_10k + ' >>result_opt.txt')
+			        exit()
+
+
+	
+				######################################  morl
+				print ('9.morl-Predict - 1 Generate single-transcript VCF ---------')
+                                os.system('mv ./ML/tmp/single_transcript.vcf ./ML/tmp/single_transcript.vcf.10k')
+				#test_vcf = "/public/home/swgenetics_5/GeneDock/annotation/benign_1/morl_union.anno.vcf"
+				#test_vcf = "~/GeneDock/annotation/mend_PB/mend_PB.test.anno.vcf"	
+                                #os.system('python scripts/filter.py ' + training_vcf + ' ' + test_vcf + ' ./ML/tmp/morl_union.filter.anno.vcf' )
+                                #input_vcf = "/public/home/swgenetics_5/GeneDock/annotation/benign_1/morl_union.anno.vcf"
+                                #input_vcf = "/public/home/swgenetics_5/GeneDock/annotation/benign_1/DVD_B_LB.vcf"
+				normal_morl_data = "./ML/tmp/morl_scaled.data"
+				input_scaled_data = normal_morl_data
+				print normal_morl_data
+				os.system('grep -v \'#\' ' + input_raw_vcf + '|awk -F \'\t\' \'{if($11==\"morl\"){print $0}}\' > morl.vcf ')
+                                os.system('cat head morl.vcf > morl_B_test_merge.vcf')
+                                input_vcf = "morl_B_test_merge.vcf"
+				no_head_path = no_head(input_vcf)
+                                single_transcript_vcf = select_transcript(no_head_path,csq_field,list_symbol,list_consequence,'single_transcript.vcf')
+                                os.system('mv ./ML/tmp/single_transcript.vcf ./ML/tmp/single_transcript.vcf.0')
+                                os.system('grep -v -E \'intron|synonymous_variant|5_prime_UTR_variant|3_prime_UTR_variant|upstream_gene_variant|downstream_gene_variant|intergenic_variant|LOW|MODIFIER\' ./ML/tmp/single_transcript.vcf.0 > ./ML/tmp/single_transcript.vcf.1')
+                                os.system('awk -F \'\t\' \'{if((length($4) ==1) && (length($5) ==1)){print $0}}\' ./ML/tmp/single_transcript.vcf.1 > ./ML/tmp/single_transcript.vcf ')
+
+                                ##### balance P and B number
+                               # os.system('python scripts/filter.py ' + training_vcf + ' ./ML/tmp/single_transcript.vcf.2 ./ML/tmp/single_transcript.vcf' )AA
+                                initial_feature_data = initial_feature(single_transcript_vcf,csq_field,list_feature,list_inheritance,'initial_feature.data', "M-CAP_score")
+                                print initial_feature_data
+                                print ('9.morl-Predict - 5 Predict the pathogenetic probability ---')
+                                flag_label = 1
+				input_label = get_label(input_scaled_data)
+                                #input_label = './ML/tmp/label0_test'
+                                flag_FN_FP = 1
+                                output_files = predict_pathogenicity(input_scaled_data,input_label,ML_model,model_path,flag_label,flag_FN_FP,flag_fea_score,flag_roc,expand_feature_name,out_path)
+                                if out_body(len(list_feature),single_transcript_vcf,no_head_path,out_path) == 0:
+                                        print "9.morl-output------------------------------------"
+                                        os.system('paste ' + ' '.join(output_files) + ' ./ML/res/tmp1.txt  ./ML/res/tmp2.txt  > '+ output_vcf)
+#                                        os.system('paste ' + ' '.join(output_files) + ' ./ML/res/tmp1.txt  ./ML/res/tmp2.txt  ./ML/res/tmp3.txt all.txt.test > '+ output_vcf)
+                                        #os.system('rm ./ML/res/tmp1.txt  ./ML/res/tmp2.txt  ./ML/res/tmp3.txt  ')
+#                               out_csv = to_csv(output_vcf,csq_field,ML_model)
+				name_2_test = str((os.path.basename(training_vcf)).split('_')[0]) + '_all_testing_' + str((os.path.basename(input_vcf)).split('.')[0]) + '.csv'
+				print "\n\n" + output_vcf
+				os.system('grep -v \'#\' ' + input_vcf + '|awk -F \'\t\' \'{print $12}\' > morl_label_old.vcf ')
+                                out_csv = to_csv(input_vcf,output_vcf,csq_field,ML_model,name_2_test,"morl_label_old.vcf")
+                                os.system('cat result.txt')
+				os.system('echo ' + param_list + ' >>result_opt.txt')
+                                out_stat_morl =  str((os.path.basename(out_csv)).split('_')[0]) + '_' + imputation + "_result_" + str((os.path.basename(input_vcf)).split('.')[0]) + ".txt"
+                                os.system('mv result.txt ' +  out_stat_morl)
+				print "\n\nresult"
+                                os.system('cat ' + out_stat_10k + ' ' + out_stat_morl)
+                                os.system('cat ' + out_stat_10k + ' ' + out_stat_morl + ' >>result_opt.txt')
+				#print out_stat_morl
+#                                out_csv_morl = str((os.path.basename(out_csv)).split('_')[0]) + "_training_" + str((os.path.basename(input_vcf)).split('.')[0]) + '.csv'
+#                                os.system('mv ' + out_csv + ' ' + out_csv_morl )
+#                                print out_csv_morl
+			else:
+				print ('ERROR: failed to create dictionary: ./ML ./ML/tmp ./ML/res.')
+	except getopt.GetoptError:
+		sys.exit()
+
+if __name__ == '__main__':
+	try:
+		sys.exit(main())
+	except IOError, e:
+		if e.errno != 32:  # ignore SIGPIPE
+			raise
