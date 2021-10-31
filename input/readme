@@ -1,3 +1,7 @@
-This folder contains the input data (VCF format) for training the DVPred model.
+This folder contains the input data for training the DVPred model.
 
 The input data has been annotated with selected features.
+
+Please note that two extra columns were added to indicate the positive and negative data points, and to show the group of the data points.
+
+We will carry on to optimize the format of input data in the future.
